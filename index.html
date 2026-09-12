@@ -304,10 +304,23 @@ img{max-width:100%;display:block;}
 <div id="modal-root"></div>
 <div id="toast-root"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script>
 /* ============================================================
    ALL ROADS LEAD TO YOU — client app
    ============================================================ */
+
+/* ====================================================================
+   SUPABASE CONFIG — paste your own project's values between the quotes.
+   Find these in Supabase: Project Settings → API Keys.
+   SUPABASE_URL = "Project URL"
+   SUPABASE_KEY = "Publishable key" (starts with sb_publishable_...)
+   Never paste your Secret key here — this file is public.
+   ==================================================================== */
+const SUPABASE_URL = 'https://fupknnhlakpvruzqvnrf.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_eV_ppVl6cIQ7DB8H0j8zLw_VI48MmcK';
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+let authReady = false; // flips true once the app's first load has finished
 
 /* ---------- storage helpers ---------- */
 async function storeGet(key, shared){
@@ -361,12 +374,24 @@ function formatTeam(current, desired){
 /* ---------- app state ---------- */
 const state = {
   currentUserId: null,
+  pendingAuthUser: null, // set when someone is signed in with Google but hasn't finished their ALROLY profile yet
   users: {},       // id -> user
   projects: {},     // id -> project
   interests: {},    // id -> interest
   reviews: {},      // id -> review ({projectId, aboutUserId, byUserId, wouldWorkAgain, feedback, createdAt})
   loaded: false
 };
+
+/* Turns a Supabase `profiles` row into the shape the rest of the app expects */
+function mapProfileRow(row){
+  return {
+    id: row.id,
+    name: row.display_name || 'ALROLY member',
+    bio: row.bio || '',
+    skills: (row.skills||'').split(',').map(s=>s.trim()).filter(Boolean),
+    interests: (row.interests||'').split(',').map(s=>s.trim()).filter(Boolean)
+  };
+}
 
 const CATEGORIES = ['Science','Technology','Entrepreneurship','Design','Research','Creative','Engineering','Education','Other'];
 const STAGES = ['Idea','Recruiting','Building','Completed'];
@@ -399,24 +424,38 @@ async function loadAllData(){
     if(v){ try{ const r = JSON.parse(v); state.reviews[r.id]=r; }catch(e){} }
   }
 
-  const session = await storeGet('session', false);
-  if(session){ try{ state.currentUserId = JSON.parse(session).userId; }catch(e){} }
+  // Everyone's public profile info (name/skills/bio) comes from Supabase now,
+  // so people can see each other across real accounts, not just their own browser.
+  try{
+    const { data: allProfiles, error } = await sb.from('profiles').select('*');
+    if(!error && allProfiles){
+      for(const row of allProfiles){ state.users[row.id] = mapProfileRow(row); }
+    }
+  }catch(e){ console.error('Failed to load profiles from Supabase', e); }
+
+  const { data: sessionData } = await sb.auth.getSession();
+  if(sessionData && sessionData.session && sessionData.session.user){
+    await syncProfileForAuthUser(sessionData.session.user);
+  }
 
   state.loaded = true;
 }
 
-async function ensureTestAccounts(){
-  const defs = [
-    {id:'u_test-creator', name:'Test Creator', bio:'Demo creator account — use this to test starting and managing a project.', skills:['Product Design','Leadership'], interests:['Technology','Education']},
-    {id:'u_test-contributor', name:'Test Contributor', bio:'Demo contributor account — use this to test discovering and joining a project.', skills:['Frontend','Writing'], interests:['Technology','Creative']},
-  ];
-  for(const d of defs){
-    if(state.users[d.id]) continue;
-    const existing = await storeGet('users:'+d.id, true);
-    if(existing) continue;
-    d.createdAt = Date.now();
-    await storeSet('users:'+d.id, JSON.stringify(d), true);
-    state.users[d.id] = d;
+/* Checks whether the signed-in Google account already has an ALROLY profile.
+   If yes, log them in. If no, park them on the "complete your profile" screen. */
+async function syncProfileForAuthUser(authUser){
+  const { data: profile } = await sb.from('profiles').select('*').eq('id', authUser.id).maybeSingle();
+  if(profile){
+    state.users[profile.id] = mapProfileRow(profile);
+    state.currentUserId = profile.id;
+    state.pendingAuthUser = null;
+  } else {
+    state.pendingAuthUser = {
+      id: authUser.id,
+      email: authUser.email,
+      name: (authUser.user_metadata && (authUser.user_metadata.full_name || authUser.user_metadata.name)) || ''
+    };
+    state.currentUserId = null;
   }
 }
 
@@ -487,25 +526,17 @@ async function seedIfNeeded(){
   await storeSet('meta:seeded', 'true', true);
 }
 
-/* ---------- session / auth (lightweight mock) ---------- */
-async function login(name){
-  name = (name||'').trim();
-  if(!name) return;
-  const slugId = 'u_' + name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
-  let user = state.users[slugId];
-  if(!user){
-    user = {id:slugId, name, bio:'', skills:[], interests:[], createdAt: Date.now()};
-    state.users[slugId] = user;
-    await storeSet('users:'+slugId, JSON.stringify(user), true);
-  }
-  state.currentUserId = slugId;
-  await storeSet('session', JSON.stringify({userId:slugId}), false);
-  route('#/');
-  showToast('Welcome, '+user.name+'.');
+/* ---------- session / auth (real Google sign-in via Supabase) ---------- */
+async function loginWithGoogle(){
+  await sb.auth.signInWithOAuth({
+    provider: 'google',
+    options: { redirectTo: window.location.origin + window.location.pathname }
+  });
 }
 async function logout(){
+  await sb.auth.signOut();
   state.currentUserId = null;
-  await storeDelete('session', false);
+  state.pendingAuthUser = null;
   route('#/');
 }
 function currentUser(){ return state.currentUserId ? state.users[state.currentUserId] : null; }
@@ -1305,30 +1336,61 @@ function renderLogin(){
   const user = currentUser();
   return `
   <div class="container">
-    <div class="login-inline">
+    <div class="login-inline" style="text-align:center;">
       ${user ? `
         <p style="font-size:13.5px;color:var(--text-soft);margin-bottom:6px;">Currently logged in as <b style="color:var(--text);">${escapeHtml(user.name)}</b></p>
         <button class="btn btn-secondary btn-block" style="margin-bottom:26px;" onclick="logout()">Log out</button>
       ` : ''}
-      <h2 style="font-size:24px;margin-bottom:8px;">${user?'Switch account':'Log in'}</h2>
-      <p style="color:var(--text-soft);font-size:14.5px;margin-bottom:22px;">This is an MVP demo &mdash; just enter a name to create or load a profile. No password needed.</p>
-      <div class="field"><label>Your name</label><input id="login-name" placeholder="e.g. Alex Rivera" onkeydown="if(event.key==='Enter') doLogin()" /></div>
-      <button class="btn btn-primary btn-block" onclick="doLogin()">Continue</button>
-
-      <div style="border-top:1.5px solid var(--card-line);margin-top:28px;padding-top:22px;">
-        <p style="font-size:13px;font-weight:600;color:var(--text-soft);margin-bottom:12px;">Quick test accounts</p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;">
-          <button class="btn btn-secondary" style="flex:1;" onclick="login('Test Creator')">Test as Creator</button>
-          <button class="btn btn-secondary" style="flex:1;" onclick="login('Test Contributor')">Test as Contributor</button>
-        </div>
-        <p style="font-size:12.5px;color:var(--text-soft);margin-top:10px;">These are two separate, persistent accounts &mdash; useful for testing the full create &rarr; join &rarr; accept flow yourself.</p>
-      </div>
+      <h2 style="font-size:24px;margin-bottom:8px;">${user?'Switch account':'Log in to ALROLY'}</h2>
+      <p style="color:var(--text-soft);font-size:14.5px;margin-bottom:22px;">Use your Google account. No new password to remember, and we only ask for what's needed to build your profile.</p>
+      <button class="btn btn-primary btn-block" onclick="loginWithGoogle()">Continue with Google</button>
     </div>
   </div>`;
 }
-function doLogin(){
-  const name = document.getElementById('login-name').value;
-  login(name);
+
+/* ---------- Onboarding (first-time profile setup, right after Google sign-in) ---------- */
+function renderOnboarding(){
+  const p = state.pendingAuthUser;
+  return `
+  <div class="container">
+    <div class="login-inline">
+      <h2 style="font-size:24px;margin-bottom:8px;">Complete your profile</h2>
+      <p style="color:var(--text-soft);font-size:14.5px;margin-bottom:22px;">Just a few details — this is what other people on ALROLY will see about you.</p>
+      <div class="field"><label>Display name</label><input id="ob-name" value="${escapeHtml(p.name||'')}" placeholder="e.g. Alex Rivera" /></div>
+      <div class="field"><label>Short bio</label><textarea id="ob-bio" placeholder="A sentence or two about you"></textarea></div>
+      <div class="field"><label>Skills (comma separated)</label><input id="ob-skills" placeholder="e.g. Python, UX Design" /></div>
+      <div class="field"><label>Interests (comma separated)</label><input id="ob-interests" placeholder="e.g. Healthcare, Education" /></div>
+      <button class="btn btn-primary btn-block" onclick="completeOnboarding()">Save and continue</button>
+      <p style="font-size:12px;color:var(--text-soft);margin-top:14px;">You can change any of this later from your profile.</p>
+    </div>
+  </div>`;
+}
+async function completeOnboarding(){
+  const p = state.pendingAuthUser;
+  if(!p) return;
+  const name = document.getElementById('ob-name').value.trim() || 'ALROLY member';
+  const bio = document.getElementById('ob-bio').value.trim();
+  const skillsRaw = document.getElementById('ob-skills').value.trim();
+  const interestsRaw = document.getElementById('ob-interests').value.trim();
+  try{
+    const { error } = await sb.from('profiles').insert({
+      id: p.id, display_name: name, bio, skills: skillsRaw, interests: interestsRaw
+    });
+    if(error) throw error;
+  }catch(e){
+    console.error(e);
+    showToast('Could not save your profile — please try again.');
+    return;
+  }
+  state.users[p.id] = {
+    id: p.id, name, bio,
+    skills: skillsRaw.split(',').map(s=>s.trim()).filter(Boolean),
+    interests: interestsRaw.split(',').map(s=>s.trim()).filter(Boolean)
+  };
+  state.currentUserId = p.id;
+  state.pendingAuthUser = null;
+  route('#/');
+  showToast('Welcome to ALROLY, '+name+'!');
 }
 
 /* ---------- Profile ---------- */
@@ -1392,11 +1454,22 @@ function autosaveProfile(){
   clearTimeout(profileSaveTimer);
   profileSaveTimer = setTimeout(async ()=>{
     const user = currentUser();
+    if(!user) return;
     user.bio = document.getElementById('p-bio').value;
     user.skills = document.getElementById('p-skills').value.split(',').map(s=>s.trim()).filter(Boolean);
     user.interests = document.getElementById('p-interests').value.split(',').map(s=>s.trim()).filter(Boolean);
-    await storeSet('users:'+user.id, JSON.stringify(user), true);
-    showToast('Profile saved.');
+    try{
+      const { error } = await sb.from('profiles').update({
+        bio: user.bio,
+        skills: user.skills.join(', '),
+        interests: user.interests.join(', ')
+      }).eq('id', user.id);
+      if(error) throw error;
+      showToast('Profile saved.');
+    }catch(e){
+      console.error(e);
+      showToast('Could not save — check your connection and try again.');
+    }
   }, 500);
 }
 
@@ -1498,6 +1571,14 @@ function render(){
   document.getElementById('mobile-menu')?.classList.remove('open');
   renderNav();
   const app = document.getElementById('app');
+
+  // Signed in with Google but no ALROLY profile yet — finish that first, on every route.
+  if(state.pendingAuthUser){
+    app.innerHTML = renderOnboarding() + renderFooter();
+    window.scrollTo(0,0);
+    return;
+  }
+
   const hash = location.hash || '#/';
   const [path, query] = hash.split('?');
   const parts = path.replace('#/','').split('/').filter(Boolean);
@@ -1536,10 +1617,36 @@ function render(){
 /* ---------- Boot ---------- */
 async function boot(){
   document.getElementById('app').innerHTML = `<div class="container skeleton">Loading roads…</div>`;
+
+  // If Google just redirected back here, the URL may briefly contain auth tokens
+  // in the hash. Our own router uses the hash for navigation too, so once Supabase
+  // has had a chance to read it, we clear it back to a clean "#/".
+  const rawHash = window.location.hash || '';
+  const looksLikeAuthRedirect = rawHash.includes('access_token') || rawHash.includes('error_description');
+
   await seedIfNeeded();
   await loadAllData();
-  await ensureTestAccounts();
+
+  if(looksLikeAuthRedirect){
+    history.replaceState(null, '', window.location.pathname + window.location.search + '#/');
+  }
+
   render();
+  authReady = true;
+
+  // Keep the app in sync if someone signs in or out (including finishing the
+  // Google redirect, or switching accounts in another tab).
+  sb.auth.onAuthStateChange(async (event, session) => {
+    if(event === 'SIGNED_IN' && session && session.user){
+      await syncProfileForAuthUser(session.user);
+      if(authReady){ route('#/'); }
+      render();
+    } else if(event === 'SIGNED_OUT'){
+      state.currentUserId = null;
+      state.pendingAuthUser = null;
+      render();
+    }
+  });
 }
 boot();
 </script>
