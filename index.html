@@ -323,24 +323,6 @@ const sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
 let authReady = false; // flips true once the app's first load has finished
 
 /* ---------- storage helpers ---------- */
-async function storeGet(key, shared){
-  try{ const r = await window.storage.get(key, shared); return r ? r.value : null; }
-  catch(e){ return null; }
-}
-async function storeSet(key, value, shared){
-  try{ await window.storage.set(key, value, shared); return true; }
-  catch(e){ console.error('storage set failed', key, e); return false; }
-}
-async function storeList(prefix, shared){
-  try{ const r = await window.storage.list(prefix, shared); return r ? r.keys : []; }
-  catch(e){ return []; }
-}
-async function storeDelete(key, shared){
-  try{ await window.storage.delete(key, shared); }catch(e){}
-}
-
-function uid(prefix){ return prefix + '_' + Math.random().toString(36).slice(2,10); }
-
 const COLORS = ['#20309B','#A8391A','#22622A','#7A5A00','#6A2E8F'];
 function colorFor(str){
   let h=0; for(let i=0;i<str.length;i++) h = str.charCodeAt(i) + ((h<<5)-h);
@@ -400,45 +382,87 @@ function mapProfileRow(row){
   };
 }
 
+/* Same idea as mapProfileRow, but for projects/interests/reviews — keeps the rest
+   of the app's code (which uses camelCase like p.shortDesc) unchanged, while the
+   actual database columns use snake_case (short_desc). */
+function mapProjectRow(row){
+  return {
+    id: row.id,
+    title: row.title || '',
+    shortDesc: row.short_desc || '',
+    category: row.category || 'Other',
+    fullDesc: row.full_desc || '',
+    problem: row.problem || '',
+    skills: toStringArray(row.skills),
+    teamSize: row.team_size || 0,
+    desiredTeam: row.desired_team || 1,
+    durationValue: row.duration_value,
+    durationUnit: row.duration_unit || 'week',
+    hoursPerWeek: row.hours_per_week,
+    status: row.status || 'Recruiting',
+    creatorId: row.creator_id,
+    members: toStringArray(row.members),
+    roles: row.roles || [],
+    deadline: row.deadline || 'Rolling',
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
+  };
+}
+function projectToRow(p){
+  return {
+    title: p.title, short_desc: p.shortDesc, category: p.category, full_desc: p.fullDesc,
+    problem: p.problem, skills: p.skills, team_size: p.teamSize, desired_team: p.desiredTeam,
+    duration_value: p.durationValue, duration_unit: p.durationUnit, hours_per_week: p.hoursPerWeek,
+    status: p.status, creator_id: p.creatorId, members: p.members, roles: p.roles, deadline: p.deadline
+  };
+}
+function mapInterestRow(row){
+  return {
+    id: row.id, projectId: row.project_id, userId: row.user_id, message: row.message || '',
+    anonymous: !!row.anonymous, status: row.status || 'pending',
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
+  };
+}
+function mapReviewRow(row){
+  return {
+    id: row.id, projectId: row.project_id, byUserId: row.by_user_id, aboutUserId: row.about_user_id,
+    wouldWorkAgain: row.would_work_again, feedback: row.feedback || '',
+    createdAt: row.created_at ? new Date(row.created_at).getTime() : Date.now()
+  };
+}
+
 const CATEGORIES = ['Science','Technology','Entrepreneurship','Design','Research','Creative','Engineering','Education','Other'];
 const STAGES = ['Idea','Recruiting','Building','Completed'];
 
-/* ---------- data load / seed ---------- */
+/* ---------- data load ---------- */
 async function loadAllData(){
-  const userKeys = await storeList('users:', true);
-  const projectKeys = await storeList('projects:', true);
-  const interestKeys = await storeList('interests:', true);
-  const reviewKeys = await storeList('reviews:', true);
-
   state.users = {};
-  for(const k of userKeys){
-    const v = await storeGet(k, true);
-    if(v){ try{ const u = JSON.parse(v); state.users[u.id]=u; }catch(e){} }
-  }
   state.projects = {};
-  for(const k of projectKeys){
-    const v = await storeGet(k, true);
-    if(v){ try{ const p = JSON.parse(v); state.projects[p.id]=p; }catch(e){} }
-  }
   state.interests = {};
-  for(const k of interestKeys){
-    const v = await storeGet(k, true);
-    if(v){ try{ const it = JSON.parse(v); state.interests[it.id]=it; }catch(e){} }
-  }
   state.reviews = {};
-  for(const k of reviewKeys){
-    const v = await storeGet(k, true);
-    if(v){ try{ const r = JSON.parse(v); state.reviews[r.id]=r; }catch(e){} }
-  }
 
-  // Everyone's public profile info (name/skills/bio) comes from Supabase now,
-  // so people can see each other across real accounts, not just their own browser.
+  // Everyone's public profile info (name/skills/bio) comes from Supabase, so people
+  // can see each other across real accounts — not just whoever's currently signed in.
   try{
     const { data: allProfiles, error } = await sb.from('profiles').select('*');
     if(!error && allProfiles){
       for(const row of allProfiles){ state.users[row.id] = mapProfileRow(row); }
     }
   }catch(e){ console.error('Failed to load profiles from Supabase', e); }
+
+  try{
+    const { data: rows, error } = await sb.from('projects').select('*');
+    if(!error && rows){ for(const row of rows){ state.projects[row.id] = mapProjectRow(row); } }
+  }catch(e){ console.error('Failed to load projects from Supabase', e); }
+
+  try{
+    const { data: rows, error } = await sb.from('interests').select('*');
+    if(!error && rows){ for(const row of rows){ state.interests[row.id] = mapInterestRow(row); } }
+  }catch(e){ console.error('Failed to load interests from Supabase', e); }
+
+  try{
+    const { data: rows, error } = await sb.from('reviews').select('*');
+    if(!error && rows){ for(const row of rows){ state.reviews[row.id] = mapReviewRow(row); } }
+  }catch(e){ console.error('Failed to load reviews from Supabase', e); }
 
   const { data: sessionData } = await sb.auth.getSession();
   if(sessionData && sessionData.session && sessionData.session.user){
@@ -464,73 +488,6 @@ async function syncProfileForAuthUser(authUser){
     };
     state.currentUserId = null;
   }
-}
-
-async function seedIfNeeded(){
-  const flag = await storeGet('meta:seeded', true);
-  if(flag) return;
-
-  const seedUsers = [
-    {id:'u_maya', name:'Maya Torres', bio:'Biomedical engineering student who loves scrappy prototypes.', skills:['Biology','Product Design'], interests:['Healthcare','Accessibility']},
-    {id:'u_devon', name:'Devon Ale', bio:'Full-stack dev, always looking for interesting side projects.', skills:['Frontend','Programming'], interests:['Education','Accessibility']},
-    {id:'u_priya', name:'Priya Nandan', bio:'Filmmaker interested in stories nobody else is telling.', skills:['Video editing','Sound'], interests:['Creative','Journalism']},
-  ];
-  for(const u of seedUsers){
-    u.createdAt = Date.now();
-    await storeSet('users:'+u.id, JSON.stringify(u), true);
-  }
-
-  const seedProjects = [
-    {
-      id:'p_diagnostic', title:'Low-cost diagnostic prototype', category:'Science',
-      shortDesc:'Developing a low-cost diagnostic concept for an accessibility-related healthcare problem.',
-      fullDesc:'We want to design and prototype a low-cost diagnostic device aimed at communities with limited access to expensive medical equipment. The goal for this phase is a working proof-of-concept, not a certified medical product.',
-      problem:'Diagnostic tools for common conditions are often expensive, bulky, or require specialists to operate — which puts them out of reach for many communities. We think a simpler, cheaper approach is possible for at least one specific use case.',
-      skills:['Biology','Python','Product Design'], teamSize:3, desiredTeam:5,
-      durationValue:3, durationUnit:'month', hoursPerWeek:3, status:'Recruiting',
-      creatorId:'u_maya', members:['u_maya'],
-      roles:[{title:'UI/UX Designer',hours:'~2 hours/week'},{title:'Python Developer',hours:'~3 hours/week'},{title:'Biomedical Researcher',hours:'~2 hours/week'}],
-      deadline:'Rolling', createdAt: Date.now()-1000*60*60*24*6
-    },
-    {
-      id:'p_studysmarter', title:'Study Smarter', category:'Technology',
-      shortDesc:'Building a simple tool that helps university students turn course material into structured study plans.',
-      fullDesc:'Study Smarter takes messy lecture notes and slides and turns them into a clean, structured study plan with spaced repetition built in. We are building a lightweight web app for the first version.',
-      problem:'Students often have all the material they need but no time-efficient way to turn it into an actual plan before an exam. Existing tools are either too simple (flashcards) or too complex (full LMS platforms).',
-      skills:['Frontend','UX/UI','Education'], teamSize:2, desiredTeam:4,
-      durationValue:8, durationUnit:'week', hoursPerWeek:3, status:'Recruiting',
-      creatorId:'u_devon', members:['u_devon'],
-      roles:[{title:'Frontend Developer',hours:'~3 hours/week'},{title:'UX Researcher',hours:'~2 hours/week'}],
-      deadline:'Rolling', createdAt: Date.now()-1000*60*60*24*3
-    },
-    {
-      id:'p_documentary', title:'Short Documentary', category:'Creative',
-      shortDesc:'Creating a short documentary about an overlooked local story.',
-      fullDesc:'We are producing a 15–20 minute documentary about a local story that hasn\'t been told before. This includes research, interviews, filming, and editing.',
-      problem:'Some meaningful local stories never get told simply because nobody with the right skills and time ever picks them up.',
-      skills:['Video editing','Camera','Sound'], teamSize:2, desiredTeam:4,
-      durationValue:2, durationUnit:'month', hoursPerWeek:4, status:'Recruiting',
-      creatorId:'u_priya', members:['u_priya'],
-      roles:[{title:'Camera Operator',hours:'~4 hours/week'},{title:'Sound Engineer',hours:'~2 hours/week'}],
-      deadline:'Rolling', createdAt: Date.now()-1000*60*60*24*10
-    },
-    {
-      id:'p_a11y', title:'Open-source Accessibility Tool', category:'Technology',
-      shortDesc:'Building a small open-source tool that makes digital interfaces easier to navigate for people with accessibility needs.',
-      fullDesc:'This tool analyzes a web page and suggests concrete accessibility improvements in plain language, aimed at small teams without a dedicated accessibility specialist.',
-      problem:'Accessibility audits are often expensive or overlooked entirely by small teams, even when they genuinely want to do better.',
-      skills:['Programming','UX','Accessibility research'], teamSize:1, desiredTeam:4,
-      durationValue:3, durationUnit:'month', hoursPerWeek:3, status:'Recruiting',
-      creatorId:'u_devon', members:['u_devon'],
-      roles:[{title:'Accessibility Researcher',hours:'~2 hours/week'},{title:'Frontend Developer',hours:'~3 hours/week'},{title:'Technical Writer',hours:'~1 hour/week'}],
-      deadline:'Rolling', createdAt: Date.now()-1000*60*60*24*1
-    }
-  ];
-  for(const p of seedProjects){
-    await storeSet('projects:'+p.id, JSON.stringify(p), true);
-  }
-
-  await storeSet('meta:seeded', 'true', true);
 }
 
 /* ---------- session / auth (real Google sign-in via Supabase) ---------- */
@@ -567,7 +524,7 @@ function closeModal(){ document.getElementById('modal-root').innerHTML=''; }
 
 function getUserInterestForProject(userId, projectId){
   // most recent interest by this user for this project (so re-applying after a decline works)
-  const list = Object.values(state.interests).filter(i=>i.projectId===projectId && i.userId===userId);
+  const list = Object.values(state.interests).filter(i=>String(i.projectId)===String(projectId) && i.userId===userId);
   list.sort((a,b)=>b.createdAt-a.createdAt);
   return list[0] || null;
 }
@@ -625,12 +582,17 @@ async function sendInterest(projectId){
   if(!user) return;
   const msg = document.getElementById('join-message').value.trim();
   const anonymous = document.getElementById('join-anonymous').checked;
-  const it = {
-    id: uid('int'), projectId, userId: user.id, message: msg, anonymous,
-    status:'pending', createdAt: Date.now()
-  };
-  state.interests[it.id] = it;
-  await storeSet('interests:'+it.id, JSON.stringify(it), true);
+  try{
+    const { data, error } = await sb.from('interests').insert({
+      project_id: Number(projectId), user_id: user.id, message: msg, anonymous, status: 'pending'
+    }).select().single();
+    if(error) throw error;
+    state.interests[data.id] = mapInterestRow(data);
+  }catch(e){
+    console.error(e);
+    showToast('Could not send your interest — please try again.');
+    return;
+  }
   closeModal();
   showToast('Interest sent!', 'The project creator can now review your profile and interest.');
   render();
@@ -644,12 +606,24 @@ async function acceptInterest(interestId){
   const user = currentUser();
   if(!user || user.id !== p.creatorId){ showToast('Only the project creator can accept interests.'); return; }
   if(isTeamFull(p)){ showToast('This team is already full.'); return; }
-  if(!p.members.includes(it.userId)) p.members.push(it.userId);
-  p.teamSize = p.members.length;
-  syncProjectStatus(p);
+  const newMembers = p.members.includes(it.userId) ? p.members : [...p.members, it.userId];
+  const newTeamSize = newMembers.length;
+  const wouldBeFull = newTeamSize >= p.desiredTeam;
+  const newStatus = (p.status==='Recruiting' && wouldBeFull) ? 'Building' : p.status;
+  try{
+    const { error: perr } = await sb.from('projects').update({
+      members: newMembers, team_size: newTeamSize, status: newStatus
+    }).eq('id', p.id);
+    if(perr) throw perr;
+    const { error: ierr } = await sb.from('interests').update({ status: 'accepted' }).eq('id', it.id);
+    if(ierr) throw ierr;
+  }catch(e){
+    console.error(e);
+    showToast('Could not accept this interest — please try again.');
+    return;
+  }
+  p.members = newMembers; p.teamSize = newTeamSize; p.status = newStatus;
   it.status = 'accepted';
-  await storeSet('projects:'+p.id, JSON.stringify(p), true);
-  await storeSet('interests:'+it.id, JSON.stringify(it), true);
   showToast(isTeamFull(p) ? 'Team full — project moved to Building.' : 'Added to the team.');
   render();
 }
@@ -659,8 +633,15 @@ async function declineInterest(interestId){
   const p = state.projects[it.projectId];
   const user = currentUser();
   if(!p || !user || user.id !== p.creatorId){ showToast('Only the project creator can decline interests.'); return; }
+  try{
+    const { error } = await sb.from('interests').update({ status: 'declined' }).eq('id', it.id);
+    if(error) throw error;
+  }catch(e){
+    console.error(e);
+    showToast('Could not decline this interest — please try again.');
+    return;
+  }
   it.status = 'declined';
-  await storeSet('interests:'+it.id, JSON.stringify(it), true);
   showToast('Interest declined.');
   render();
 }
@@ -686,8 +667,15 @@ async function confirmComplete(projectId){
   const p = state.projects[projectId];
   const user = currentUser();
   if(!p || !user || user.id !== p.creatorId) return;
+  try{
+    const { error } = await sb.from('projects').update({ status: 'Completed' }).eq('id', p.id);
+    if(error) throw error;
+  }catch(e){
+    console.error(e);
+    showToast('Could not update this project — please try again.');
+    return;
+  }
   p.status = 'Completed';
-  await storeSet('projects:'+p.id, JSON.stringify(p), true);
   closeModal();
   showToast('Project marked as completed.');
   render();
@@ -695,17 +683,31 @@ async function confirmComplete(projectId){
 
 /* ---------- Collaboration reviews (structure only, for post-completion feedback) ---------- */
 function getReviewFrom(projectId, byUserId, aboutUserId){
-  return Object.values(state.reviews).find(r=>r.projectId===projectId && r.byUserId===byUserId && r.aboutUserId===aboutUserId) || null;
+  return Object.values(state.reviews).find(r=>String(r.projectId)===String(projectId) && r.byUserId===byUserId && r.aboutUserId===aboutUserId) || null;
 }
 async function submitReview(projectId, aboutUserId, wouldWorkAgain){
   const user = currentUser();
   if(!user) return;
   const existing = getReviewFrom(projectId, user.id, aboutUserId);
-  const r = existing || {id: uid('rev'), projectId, byUserId:user.id, aboutUserId, createdAt: Date.now()};
-  r.wouldWorkAgain = wouldWorkAgain; // 'yes' | 'maybe' | 'no'
-  r.feedback = (document.getElementById('review-feedback-'+aboutUserId)?.value || r.feedback || '').trim();
-  state.reviews[r.id] = r;
-  await storeSet('reviews:'+r.id, JSON.stringify(r), true);
+  const feedback = (document.getElementById('review-feedback-'+aboutUserId)?.value || (existing?existing.feedback:'') || '').trim();
+  try{
+    if(existing){
+      const { error } = await sb.from('reviews').update({ would_work_again: wouldWorkAgain, feedback }).eq('id', existing.id);
+      if(error) throw error;
+      existing.wouldWorkAgain = wouldWorkAgain; existing.feedback = feedback;
+    } else {
+      const { data, error } = await sb.from('reviews').insert({
+        project_id: projectId, by_user_id: user.id, about_user_id: aboutUserId,
+        would_work_again: wouldWorkAgain, feedback
+      }).select().single();
+      if(error) throw error;
+      state.reviews[data.id] = mapReviewRow(data);
+    }
+  }catch(e){
+    console.error(e);
+    showToast('Could not save your feedback — please try again.');
+    return;
+  }
   showToast('Thanks for the feedback.');
   render();
 }
@@ -1080,7 +1082,7 @@ function renderProjectDetail(id){
     ctaContent = `<button class="btn btn-primary" onclick="openJoinModal('${p.id}')">I want to join</button>`;
   }
 
-  const projectInterests = Object.values(state.interests).filter(i=>i.projectId===p.id).sort((a,b)=>b.createdAt-a.createdAt);
+  const projectInterests = Object.values(state.interests).filter(i=>String(i.projectId)===String(p.id)).sort((a,b)=>b.createdAt-a.createdAt);
 
   return `
   <div class="detail-header">
@@ -1318,7 +1320,7 @@ async function submitProject(){
   const skills = d.skillsRaw.split(',').map(s=>s.trim()).filter(Boolean);
   const roles = d.roles.filter(r=>r.title.trim());
   const p = {
-    id: uid('p'), title:d.title.trim(), shortDesc:d.shortDesc.trim(), category:d.category,
+    title:d.title.trim(), shortDesc:d.shortDesc.trim(), category:d.category,
     fullDesc: d.fullDesc.trim() || d.shortDesc.trim(),
     problem: d.problem.trim() || 'Not specified yet.',
     skills: skills.length?skills:['General'],
@@ -1328,14 +1330,21 @@ async function submitProject(){
     status:'Recruiting',
     creatorId:user.id, members:[user.id],
     roles: roles.length?roles:[{title:'Contributor',hours:'Flexible'}],
-    deadline: d.deadline.trim()||'Rolling', createdAt: Date.now()
+    deadline: d.deadline.trim()||'Rolling'
   };
   syncProjectStatus(p);
-  state.projects[p.id] = p;
-  await storeSet('projects:'+p.id, JSON.stringify(p), true);
-  draftProject = null;
-  showToast('Your project is live.');
-  route('#/project/'+p.id);
+  try{
+    const { data, error } = await sb.from('projects').insert(projectToRow(p)).select().single();
+    if(error) throw error;
+    const saved = mapProjectRow(data);
+    state.projects[saved.id] = saved;
+    draftProject = null;
+    showToast('Your project is live.');
+    route('#/project/'+saved.id);
+  }catch(e){
+    console.error(e);
+    showToast('Could not publish your project — please try again.');
+  }
 }
 
 /* ---------- Login ---------- */
@@ -1483,7 +1492,7 @@ function renderDashboard(){
   const myProjects = Object.values(state.projects).filter(p=>p.creatorId===user.id);
   const joining = Object.values(state.projects).filter(p=>p.members.includes(user.id) && p.creatorId!==user.id);
   const sent = Object.values(state.interests).filter(i=>i.userId===user.id);
-  const received = Object.values(state.interests).filter(i=> myProjects.some(p=>p.id===i.projectId));
+  const received = Object.values(state.interests).filter(i=> myProjects.some(p=>String(p.id)===String(i.projectId)));
 
   return `
   <div class="container">
@@ -1627,7 +1636,6 @@ async function boot(){
   const rawHash = window.location.hash || '';
   const looksLikeAuthRedirect = rawHash.includes('access_token') || rawHash.includes('error_description');
 
-  await seedIfNeeded();
   await loadAllData();
 
   if(looksLikeAuthRedirect){
